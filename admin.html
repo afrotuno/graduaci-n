@@ -120,16 +120,14 @@
 
   onAuthStateChanged(auth, async (user) => {
     if (user) {
-      // Comprobar que el email coincide con el admin configurado
       const adminEmail = (window.ADMIN_EMAIL || "").toLowerCase();
       const userEmail  = (user.email || "").toLowerCase();
       if (adminEmail && userEmail !== adminEmail) {
-        // No es admin: mostrar mensaje y cerrar sesión
         hide($("vista-admin"));
         show($("vista-login"));
         $("login-error").innerHTML =
-          'Esta cuenta no tiene permisos de administraci&oacute;n.<br>' +
-          'Si vienes a escanear, usa la <a href="scan.html">p&aacute;gina del esc&aacute;ner</a>.';
+          'Esta cuenta no tiene permisos de administración.<br>' +
+          'Si vienes a escanear, usa la <a href="scan.html">página del escáner</a>.';
         await signOut(auth);
         return;
       }
@@ -145,7 +143,6 @@
 
   // ----------- Generación de códigos -----------
   function generarCodigo() {
-    // 6 caracteres alfanum sin caracteres ambiguos (0/O, 1/I/L)
     const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let c = "ENT-";
     for (let i = 0; i < 6; i++) c += chars[Math.floor(Math.random() * chars.length)];
@@ -190,7 +187,6 @@
       </div>
     `).join("");
 
-    // Listeners por botón
     $("lista").querySelectorAll("[data-toggle]").forEach(btn => {
       btn.onclick = async () => {
         const id = btn.dataset.toggle;
@@ -220,7 +216,6 @@
     $("btn-crear").disabled = true;
     $("btn-crear").textContent = "Creando...";
     try {
-      // Evitar colisiones: comprobar contra cache + reintentar si choca
       const existentes = new Set(entradasCache.map(e => e.id));
       const batch = writeBatch(db);
       let creados = 0;
@@ -263,7 +258,7 @@
   });
 
   // ============================================================
-  //  GENERAR PDF: una entrada por página A4 vertical
+  //  GENERAR PDF: 10 entradas por página A4 (2 col × 5 filas)
   // ============================================================
   $("btn-pdf").addEventListener("click", async () => {
     if (entradasCache.length === 0) return alert("No hay entradas para imprimir.");
@@ -271,39 +266,54 @@
     $("btn-pdf").textContent = "Generando PDF...";
 
     try {
-      // Cargar jsPDF y qrcode dinámicamente
       await cargarScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
       await cargarScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js");
 
       const { jsPDF } = window.jspdf;
       const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
 
-      // Datos de configuración (vienen de config.js)
       const evento = window.NOMBRE_EVENTO || "Graduación";
-      const fecha  = window.FECHA_EVENTO  || "Por confirmar";
-      const hora   = window.HORA_EVENTO   || "Por confirmar";
-      const lugar  = window.LUGAR_EVENTO  || "";
-      const siglas = window.SIGLAS_IES    || "IES";
 
-      // Cargar logo si existe; null = se dibuja placeholder
-      const logoData = await cargarLogoComoDataURL(window.LOGO_URL);
+      // --- Cargar logo: base64 tiene prioridad, luego URL, luego nada ---
+      let logoData = null;
+      if (window.LOGO_BASE64) {
+        const img = new Image();
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+          img.src = window.LOGO_BASE64;
+        });
+        logoData = { dataURL: window.LOGO_BASE64, w: img.naturalWidth, h: img.naturalHeight };
+      } else if (window.LOGO_URL) {
+        logoData = await cargarLogoComoDataURL(window.LOGO_URL);
+      }
 
-      // Medidas A4 vertical
-      const W = 210, H = 297, M = 18;
-      const cardX = M, cardY = M, cardW = W - 2*M, cardH = H - 2*M;
+      // --- Medidas de la cuadrícula ---
+      const pageW = 210, pageH = 297;
+      const margin = 8;
+      const cols = 2, rows = 5;                       // 10 por página
+      const cellW = (pageW - 2 * margin) / cols;      // ~97mm
+      const cellH = (pageH - 2 * margin) / rows;      // ~56.2mm
+      const pad = 3;                                   // padding interno
 
-      // Ordenar por código alfabético para PDF predecible
       const ordenadas = [...entradasCache].sort((a, b) => a.id.localeCompare(b.id));
+      const perPage = cols * rows;
 
       for (let i = 0; i < ordenadas.length; i++) {
-        if (i > 0) pdf.addPage();
-        await dibujarPaginaEntrada(pdf, ordenadas[i].id, {
-          evento, fecha, hora, lugar, siglas, logoData,
-          W, H, M, cardX, cardY, cardW, cardH
+        if (i > 0 && i % perPage === 0) pdf.addPage();
+
+        const idx = i % perPage;
+        const c = idx % cols;
+        const r = Math.floor(idx / cols);
+        const x = margin + c * cellW;
+        const y = margin + r * cellH;
+
+        await dibujarCeldaEntrada(pdf, ordenadas[i].id, {
+          x, y, cellW, cellH, pad, evento, logoData
         });
       }
 
-      pdf.save(`entradas_${(evento || 'graduacion').replace(/\s+/g,'_').toLowerCase()}.pdf`);
+      pdf.save(`entradas_${(evento).replace(/\s+/g,'_').replace(/[^a-zA-Z0-9_áéíóúñÁÉÍÓÚÑ]/g,'').toLowerCase()}.pdf`);
     } catch (err) {
       alert("Error generando PDF: " + err.message);
       console.error(err);
@@ -314,136 +324,77 @@
   });
 
   // ============================================================
-  //  Dibuja una sola página/entrada en el PDF
+  //  Dibuja UNA celda de entrada compacta (~97mm × ~56mm)
   // ============================================================
-  async function dibujarPaginaEntrada(pdf, codigo, opt) {
-    const { evento, fecha, hora, lugar, siglas, logoData,
-            W, cardX, cardY, cardW, cardH } = opt;
+  async function dibujarCeldaEntrada(pdf, codigo, opt) {
+    const { x, y, cellW, cellH, pad, evento, logoData } = opt;
 
-    // ---------- Marco exterior decorativo ----------
-    pdf.setDrawColor(40, 60, 110);
-    pdf.setLineWidth(0.8);
-    pdf.rect(cardX, cardY, cardW, cardH);
-    pdf.setLineWidth(0.2);
-    pdf.rect(cardX + 2, cardY + 2, cardW - 4, cardH - 4);
+    // --- Borde discontinuo para recortar ---
+    pdf.setDrawColor(180, 180, 180);
+    pdf.setLineWidth(0.3);
+    pdf.setLineDashPattern([2, 2], 0);
+    pdf.rect(x, y, cellW, cellH);
+    pdf.setLineDashPattern([], 0);
 
-    // ---------- Cabecera: logo banner centrado ----------
-    let cursorY = cardY + 10;            // y por donde vamos dibujando
+    // --- Área interior con padding ---
+    const ix = x + pad;
+    const iy = y + pad;
+    const iw = cellW - 2 * pad;
+    const ih = cellH - 2 * pad;
+
+    // ~~~ FILA SUPERIOR: Logo + Nombre evento (~14mm) ~~~
+    const headerH = 14;
+    let logoEndX = ix;
 
     if (logoData && logoData.dataURL) {
-      // Logo manteniendo aspect ratio. Caja máxima 130 mm de ancho × 45 mm de alto.
-      const maxW = 130, maxH = 45;
+      const maxLogoH = 12, maxLogoW = 28;
       const ratio = logoData.w / logoData.h;
-      let drawW = maxW, drawH = maxW / ratio;
-      if (drawH > maxH) { drawH = maxH; drawW = maxH * ratio; }
-      const drawX = cardX + (cardW - drawW) / 2;
-      pdf.addImage(logoData.dataURL, "PNG", drawX, cursorY, drawW, drawH,
-                   undefined, "FAST");
-      cursorY += drawH + 4;
-    } else {
-      // Placeholder: círculo grande con siglas
-      const r = 18;
-      pdf.setDrawColor(40, 60, 110);
-      pdf.setFillColor(232, 240, 254);
-      pdf.circle(cardX + cardW/2, cursorY + r, r, "FD");
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(20);
-      pdf.setTextColor(40, 60, 110);
-      pdf.text(siglas, cardX + cardW/2, cursorY + r + 3, { align: "center" });
-      cursorY += 2*r + 4;
+      let drawH = maxLogoH, drawW = maxLogoH * ratio;
+      if (drawW > maxLogoW) { drawW = maxLogoW; drawH = maxLogoW / ratio; }
+      const logoY = iy + (headerH - drawH) / 2;
+      pdf.addImage(logoData.dataURL, "PNG", ix, logoY, drawW, drawH, undefined, "FAST");
+      logoEndX = ix + drawW + 2;
     }
 
-    // Subtítulo con nombre del evento
+    // Nombre del evento a la derecha del logo
     pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(15);
+    pdf.setFontSize(7.5);
     pdf.setTextColor(40, 60, 110);
-    pdf.text(evento, cardX + cardW/2, cursorY + 7, { align: "center" });
-    cursorY += 11;
-
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-    pdf.setTextColor(120, 120, 120);
-    pdf.text("ENTRADA · Presenta este código al entrar", cardX + cardW/2,
-             cursorY + 4, { align: "center" });
-    cursorY += 6;
+    const maxTextW = iw - (logoEndX - ix) - 2;
+    const lineas = pdf.splitTextToSize(evento, maxTextW);
+    const textoY = iy + headerH / 2 - (lineas.length * 3) / 2 + 3;
+    pdf.text(lineas, logoEndX + 1, textoY);
 
     // Línea separadora
+    const sepY = iy + headerH;
     pdf.setDrawColor(40, 60, 110);
-    pdf.setLineWidth(0.4);
-    pdf.line(cardX + 12, cursorY + 3, cardX + cardW - 12, cursorY + 3);
-    cursorY += 8;
+    pdf.setLineWidth(0.2);
+    pdf.line(ix + 2, sepY, ix + iw - 2, sepY);
 
-    // ---------- QR enorme centrado ----------
-    const qrSize = 92;
-    const qrX = cardX + (cardW - qrSize) / 2;
-    const qrY = cursorY;
-    const qrDataURL = await generarQRDataURL(codigo, 512);
+    // ~~~ ZONA CENTRAL: QR + Código ~~~
+    const qrSize = 28;
+    const qrX = ix + (iw - qrSize) / 2;
+    const qrY = sepY + 2;
+
+    const qrDataURL = await generarQRDataURL(codigo, 256);
     pdf.addImage(qrDataURL, "PNG", qrX, qrY, qrSize, qrSize);
 
-    // Borde fino alrededor del QR
-    pdf.setDrawColor(220);
-    pdf.setLineWidth(0.2);
-    pdf.rect(qrX - 2, qrY - 2, qrSize + 4, qrSize + 4);
-
-    // ---------- Código de la entrada ----------
+    // Código debajo del QR
     pdf.setFont("courier", "bold");
-    pdf.setFontSize(20);
+    pdf.setFontSize(10);
     pdf.setTextColor(40, 60, 110);
-    pdf.text(codigo, W/2, qrY + qrSize + 12, { align: "center" });
+    pdf.text(codigo, ix + iw / 2, qrY + qrSize + 4, { align: "center" });
 
-    // ---------- Datos del evento ----------
-    const infoY = qrY + qrSize + 22;
+    // ~~~ PIE: "Una entrada, una persona" ~~~
+    const footY = iy + ih - 1;
     pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(11);
-    pdf.setTextColor(60, 60, 60);
-
-    const linea = (label, value, y, pendiente) => {
-      pdf.setFont("helvetica", "bold");
-      pdf.setTextColor(60, 60, 60);
-      pdf.text(label, cardX + 18, y);
-      pdf.setFont("helvetica", pendiente ? "italic" : "normal");
-      if (pendiente) {
-        pdf.setTextColor(200, 130, 50);
-      } else {
-        pdf.setTextColor(60, 60, 60);
-      }
-      pdf.text(value, cardX + 50, y);
-      pdf.setTextColor(60, 60, 60);
-    };
-    const esPendiente = (s) => /por confirmar/i.test(s || "");
-    linea("FECHA:", fecha, infoY,        esPendiente(fecha));
-    linea("HORA:",  hora,  infoY + 7,    esPendiente(hora));
-    if (lugar) linea("LUGAR:", lugar, infoY + 14, esPendiente(lugar));
-
-    // ---------- Línea de corte decorativa ----------
-    const cutY = cardY + cardH - 28;
-    pdf.setDrawColor(180);
-    pdf.setLineWidth(0.3);
-    pdf.setLineDashPattern([1.5, 1.5], 0);
-    pdf.line(cardX + 8, cutY, cardX + cardW - 8, cutY);
-    pdf.setLineDashPattern([], 0);
-    pdf.setFillColor(255, 255, 255);
-    pdf.rect(W/2 - 4, cutY - 2, 8, 4, "F");
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-    pdf.setTextColor(140);
-    pdf.text("✂", W/2, cutY + 1.5, { align: "center" });
-
-    // ---------- Pie ----------
-    const footY = cardY + cardH - 16;
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(11);
-    pdf.setTextColor(40, 60, 110);
-    pdf.text("Una entrada, una persona", W/2, footY, { align: "center" });
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(8);
-    pdf.setTextColor(140);
-    pdf.text("Esta entrada es nominativa al portador. Consérvala hasta el final del evento.",
-             W/2, footY + 5, { align: "center" });
+    pdf.setFontSize(5.5);
+    pdf.setTextColor(140, 140, 140);
+    pdf.text("Una entrada, una persona · Presenta este código al entrar", ix + iw / 2, footY, { align: "center" });
   }
 
   // ============================================================
-  //  Utilidades de carga
+  //  Utilidades
   // ============================================================
   function cargarScript(src) {
     return new Promise((resolve, reject) => {
@@ -454,14 +405,12 @@
     });
   }
 
-  // Carga el logo y lo redimensiona (para no inflar el PDF si es enorme).
-  // Devuelve { dataURL, w, h } con las dimensiones originales (para
-  // poder mantener el aspect ratio al dibujarlo). null si no se puede.
-  async function cargarLogoComoDataURL(url, maxPx = 600) {
+  async function cargarLogoComoDataURL(url, maxPx = 400) {
     if (!url) return null;
     try {
+      // Intento 1: fetch directo
       const r = await fetch(url, { cache: "no-store" });
-      if (!r.ok) return null;
+      if (!r.ok) throw new Error("fetch no ok");
       const blob = await r.blob();
       const objURL = URL.createObjectURL(blob);
       const img = new Image();
@@ -475,26 +424,43 @@
       const w = Math.max(1, Math.round(origW * scale));
       const h = Math.max(1, Math.round(origH * scale));
       const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, w, h);
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
       const dataURL = canvas.toDataURL('image/png');
       URL.revokeObjectURL(objURL);
       return { dataURL, w: origW, h: origH };
     } catch (e) {
-      console.warn('No se pudo cargar logo:', e);
-      return null;
+      console.warn('Fetch del logo falló, intentando img con crossOrigin...', e);
+      try {
+        // Intento 2: img con crossOrigin
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+          img.src = url;
+        });
+        const origW = img.naturalWidth, origH = img.naturalHeight;
+        const scale = Math.min(maxPx / origW, maxPx / origH, 1);
+        const w = Math.max(1, Math.round(origW * scale));
+        const h = Math.max(1, Math.round(origH * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const dataURL = canvas.toDataURL('image/png');
+        return { dataURL, w: origW, h: origH };
+      } catch (e2) {
+        console.warn('No se pudo cargar logo. Usa LOGO_BASE64 en config.js:', e2);
+        return null;
+      }
     }
   }
 
-  // Genera un PNG dataURL del QR usando qrcodejs
   function generarQRDataURL(texto, size) {
     return new Promise((resolve) => {
       const div = document.createElement("div");
       div.style.display = "none";
       document.body.appendChild(div);
-      // eslint-disable-next-line no-new
       new QRCode(div, {
         text: texto, width: size, height: size,
         correctLevel: QRCode.CorrectLevel.H
