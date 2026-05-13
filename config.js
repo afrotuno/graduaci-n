@@ -19,7 +19,7 @@ window.ADMIN_EMAIL   = "enriquemateos@gmail.com";  // ← Cámbialo por tu email
 // --- Logo del instituto ---
 // OPCIÓN RECOMENDADA: Descarga el logo PNG y súbelo a tu repositorio
 // de GitHub junto al resto de archivos. Luego pon aquí el nombre:
-window.LOGO_URL = "logo.png";
+window.LOGO_URL = "blancalogo.png";
 
 // ALTERNATIVA - URL externa (puede fallar por CORS):
 // window.LOGO_URL = "https://site.educa.madrid.org/ies.blancafdezochoa.madrid//wp-content/uploads/ies.blancafdezochoa.madrid/2024/08/cropped-BFO-Blanca-Fernandez-Ochoa.png";
