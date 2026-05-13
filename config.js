@@ -20,7 +20,7 @@ window.ADMIN_EMAIL = "enriquemateos@gmail.com";
 
 
 // Nombre del centro / evento (aparece en cabeceras y PDF)
-window.NOMBRE_EVENTO = "Graduación 2026 · IES Aldebarán";
+window.NOMBRE_EVENTO = "Graduación 2026 · IES Blanca Fernandez Ochoa";
 
 // Email del usuario administrador. Solo este usuario podrá entrar
 // al panel de admin. Tiene que coincidir con el email puesto en las
