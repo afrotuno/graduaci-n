@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin · Entradas Graduación</title>
+  <link rel="stylesheet" href="style.css" />
+  <meta name="theme-color" content="#0f172a" />
+</head>
+<body>
+
+<!-- ======== LOGIN ======== -->
+<section id="vista-login" class="container" style="padding-top: 3rem;">
+  <div class="card">
+    <h1>Acceso administrador</h1>
+    <p class="muted" style="margin-bottom:1rem;">Introduce tus credenciales para gestionar las entradas.</p>
+    <form id="form-login">
+      <label for="email">Correo electrónico</label>
+      <input id="email" type="email" autocomplete="username" required />
+      <label for="password">Contraseña</label>
+      <input id="password" type="password" autocomplete="current-password" required />
+      <button class="btn btn-block" type="submit">Entrar</button>
+      <p id="login-error" class="muted" style="color:#f87171; margin-top:0.75rem;"></p>
+    </form>
+    <p class="muted" style="margin-top:1rem; text-align:center;">
+      <a href="index.html">← Volver</a>
+    </p>
+  </div>
+</section>
+
+<!-- ======== PANEL ADMIN ======== -->
+<section id="vista-admin" class="hidden">
+  <header class="topbar">
+    <h1 id="evento-titulo">Admin · Entradas</h1>
+    <span><span id="user-email" class="user"></span> · <a href="#" id="btn-logout">Salir</a></span>
+  </header>
+
+  <div class="container">
+
+    <!-- Estadísticas -->
+    <div class="stats">
+      <div class="stat"><div class="num" id="stat-total">0</div><div class="lbl">Total</div></div>
+      <div class="stat"><div class="num" id="stat-disponibles" style="color:#34d399;">0</div><div class="lbl">Disponibles</div></div>
+      <div class="stat"><div class="num" id="stat-usadas" style="color:#f87171;">0</div><div class="lbl">Usadas</div></div>
+    </div>
+
+    <!-- Crear entradas -->
+    <div class="card">
+      <h2>Crear nuevas entradas</h2>
+      <div class="toolbar">
+        <input id="cantidad" type="number" min="1" max="500" value="10" style="margin-bottom:0;" />
+        <button id="btn-crear" class="btn">Crear N entradas</button>
+      </div>
+      <p class="muted">Se generan códigos únicos del tipo <code>ENT-XXXXXX</code>.</p>
+    </div>
+
+    <!-- Acciones masivas -->
+    <div class="card">
+      <h2>Acciones</h2>
+      <div class="toolbar">
+        <button id="btn-pdf" class="btn btn-success">📄 Descargar PDF imprimible</button>
+        <button id="btn-resetear" class="btn btn-secondary">↺ Marcar todas como NO usadas</button>
+        <button id="btn-borrar-todo" class="btn btn-danger">🗑 Borrar TODAS las entradas</button>
+      </div>
+    </div>
+
+    <!-- Lista -->
+    <div class="card">
+      <h2>Entradas (<span id="lista-count">0</span>)</h2>
+      <div class="toolbar">
+        <input id="filtro" type="text" placeholder="Filtrar por código..." style="margin-bottom:0;" />
+      </div>
+      <div id="lista" class="list"></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ======== Bibliotecas ======== -->
+<script src="config.js"></script>
+<!-- Firebase v10 modular vía import -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    getFirestore, collection, doc, getDocs, setDoc, deleteDoc, updateDoc,
+    onSnapshot, query, orderBy, writeBatch
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const app  = initializeApp(window.firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+  const col  = collection(db, "entradas");
+
+  // ----------- Helpers UI -----------
+  const $ = (id) => document.getElementById(id);
+  const show = (el) => el.classList.remove('hidden');
+  const hide = (el) => el.classList.add('hidden');
+
+  if (window.NOMBRE_EVENTO) $("evento-titulo").textContent = window.NOMBRE_EVENTO;
+
+  // ----------- Login -----------
+  $("form-login").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    $("login-error").textContent = "";
+    try {
+      await signInWithEmailAndPassword(auth, $("email").value.trim(), $("password").value);
+    } catch (err) {
+      $("login-error").textContent = "Credenciales incorrectas o usuario no autorizado.";
+      console.error(err);
+    }
+  });
+
+  $("btn-logout").addEventListener("click", (e) => {
+    e.preventDefault();
+    signOut(auth);
+  });
+
+  onAuthStateChanged(auth, async (user) => {
+    if (user) {
+      // Comprobar que el email coincide con el admin configurado
+      const adminEmail = (window.ADMIN_EMAIL || "").toLowerCase();
+      const userEmail  = (user.email || "").toLowerCase();
+      if (adminEmail && userEmail !== adminEmail) {
+        // No es admin: mostrar mensaje y cerrar sesión
+        hide($("vista-admin"));
+        show($("vista-login"));
+        $("login-error").innerHTML =
+          'Esta cuenta no tiene permisos de administraci&oacute;n.<br>' +
+          'Si vienes a escanear, usa la <a href="scan.html">p&aacute;gina del esc&aacute;ner</a>.';
+        await signOut(auth);
+        return;
+      }
+      hide($("vista-login"));
+      show($("vista-admin"));
+      $("user-email").textContent = user.email;
+      iniciarListener();
+    } else {
+      hide($("vista-admin"));
+      show($("vista-login"));
+    }
+  });
+
+  // ----------- Generación de códigos -----------
+  function generarCodigo() {
+    // 6 caracteres alfanum sin caracteres ambiguos (0/O, 1/I/L)
+    const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let c = "ENT-";
+    for (let i = 0; i < 6; i++) c += chars[Math.floor(Math.random() * chars.length)];
+    return c;
+  }
+
+  // ----------- Lectura en tiempo real -----------
+  let entradasCache = [];
+  function iniciarListener() {
+    const q = query(col, orderBy("creada", "desc"));
+    onSnapshot(q, (snap) => {
+      entradasCache = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      pintarLista();
+      pintarStats();
+    });
+  }
+
+  function pintarStats() {
+    const total = entradasCache.length;
+    const usadas = entradasCache.filter(e => e.usada).length;
+    $("stat-total").textContent = total;
+    $("stat-usadas").textContent = usadas;
+    $("stat-disponibles").textContent = total - usadas;
+  }
+
+  function pintarLista() {
+    const filtro = $("filtro").value.trim().toUpperCase();
+    const lista = entradasCache.filter(e => e.id.includes(filtro));
+    $("lista-count").textContent = lista.length;
+    $("lista").innerHTML = lista.map(e => `
+      <div class="list-item">
+        <span class="codigo">${e.id}</span>
+        <span class="${e.usada ? 'badge badge-used' : 'badge badge-ok'}">
+          ${e.usada ? 'Usada' : 'Disponible'}
+        </span>
+        <span style="display:flex; gap:0.25rem;">
+          <button class="btn btn-secondary" data-toggle="${e.id}" style="padding:0.4rem 0.6rem; font-size:0.8rem;">
+            ${e.usada ? 'Reactivar' : 'Marcar usada'}
+          </button>
+          <button class="btn btn-danger" data-del="${e.id}" style="padding:0.4rem 0.6rem; font-size:0.8rem;">✕</button>
+        </span>
+      </div>
+    `).join("");
+
+    // Listeners por botón
+    $("lista").querySelectorAll("[data-toggle]").forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.dataset.toggle;
+        const ent = entradasCache.find(e => e.id === id);
+        await updateDoc(doc(col, id), {
+          usada: !ent.usada,
+          usadaEn: !ent.usada ? new Date().toISOString() : null
+        });
+      };
+    });
+    $("lista").querySelectorAll("[data-del]").forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm(`¿Borrar la entrada ${btn.dataset.del}?`)) return;
+        await deleteDoc(doc(col, btn.dataset.del));
+      };
+    });
+  }
+
+  $("filtro").addEventListener("input", pintarLista);
+
+  // ----------- Crear N entradas -----------
+  $("btn-crear").addEventListener("click", async () => {
+    const n = parseInt($("cantidad").value, 10);
+    if (!n || n < 1) return alert("Indica un número válido.");
+    if (n > 500) return alert("Máximo 500 por lote.");
+
+    $("btn-crear").disabled = true;
+    $("btn-crear").textContent = "Creando...";
+    try {
+      // Evitar colisiones: comprobar contra cache + reintentar si choca
+      const existentes = new Set(entradasCache.map(e => e.id));
+      const batch = writeBatch(db);
+      let creados = 0;
+      while (creados < n) {
+        const codigo = generarCodigo();
+        if (existentes.has(codigo)) continue;
+        existentes.add(codigo);
+        batch.set(doc(col, codigo), {
+          usada: false,
+          usadaEn: null,
+          creada: new Date().toISOString()
+        });
+        creados++;
+      }
+      await batch.commit();
+    } catch (err) {
+      alert("Error al crear: " + err.message);
+      console.error(err);
+    } finally {
+      $("btn-crear").disabled = false;
+      $("btn-crear").textContent = "Crear N entradas";
+    }
+  });
+
+  // ----------- Borrar todo -----------
+  $("btn-borrar-todo").addEventListener("click", async () => {
+    if (!confirm(`¿Seguro que quieres borrar TODAS las ${entradasCache.length} entradas? Esta acción no se puede deshacer.`)) return;
+    if (!confirm("Última confirmación. ¿Borrar todas las entradas?")) return;
+    const batch = writeBatch(db);
+    entradasCache.forEach(e => batch.delete(doc(col, e.id)));
+    await batch.commit();
+  });
+
+  // ----------- Resetear (todas a no usada) -----------
+  $("btn-resetear").addEventListener("click", async () => {
+    if (!confirm("¿Marcar TODAS las entradas como NO usadas? Útil si has hecho una prueba.")) return;
+    const batch = writeBatch(db);
+    entradasCache.forEach(e => batch.update(doc(col, e.id), { usada: false, usadaEn: null }));
+    await batch.commit();
+  });
+
+  // ============================================================
+  //  GENERAR PDF: una entrada por página A4 vertical
+  // ============================================================
+  $("btn-pdf").addEventListener("click", async () => {
+    if (entradasCache.length === 0) return alert("No hay entradas para imprimir.");
+    $("btn-pdf").disabled = true;
+    $("btn-pdf").textContent = "Generando PDF...";
+
+    try {
+      // Cargar jsPDF y qrcode dinámicamente
+      await cargarScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+      await cargarScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js");
+
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+
+      // Datos de configuración (vienen de config.js)
+      const evento = window.NOMBRE_EVENTO || "Graduación";
+      const fecha  = window.FECHA_EVENTO  || "Por confirmar";
+      const hora   = window.HORA_EVENTO   || "Por confirmar";
+      const lugar  = window.LUGAR_EVENTO  || "";
+      const siglas = window.SIGLAS_IES    || "IES";
+
+      // Cargar logo si existe; null = se dibuja placeholder
+      const logoData = await cargarLogoComoDataURL(window.LOGO_URL);
+
+      // Medidas A4 vertical
+      const W = 210, H = 297, M = 18;
+      const cardX = M, cardY = M, cardW = W - 2*M, cardH = H - 2*M;
+
+      // Ordenar por código alfabético para PDF predecible
+      const ordenadas = [...entradasCache].sort((a, b) => a.id.localeCompare(b.id));
+
+      for (let i = 0; i < ordenadas.length; i++) {
+        if (i > 0) pdf.addPage();
+        await dibujarPaginaEntrada(pdf, ordenadas[i].id, {
+          evento, fecha, hora, lugar, siglas, logoData,
+          W, H, M, cardX, cardY, cardW, cardH
+        });
+      }
+
+      pdf.save(`entradas_${(evento || 'graduacion').replace(/\s+/g,'_').toLowerCase()}.pdf`);
+    } catch (err) {
+      alert("Error generando PDF: " + err.message);
+      console.error(err);
+    } finally {
+      $("btn-pdf").disabled = false;
+      $("btn-pdf").textContent = "📄 Descargar PDF imprimible";
+    }
+  });
+
+  // ============================================================
+  //  Dibuja una sola página/entrada en el PDF
+  // ============================================================
+  async function dibujarPaginaEntrada(pdf, codigo, opt) {
+    const { evento, fecha, hora, lugar, siglas, logoData,
+            W, cardX, cardY, cardW, cardH } = opt;
+
+    // ---------- Marco exterior decorativo ----------
+    pdf.setDrawColor(40, 60, 110);
+    pdf.setLineWidth(0.8);
+    pdf.rect(cardX, cardY, cardW, cardH);
+    pdf.setLineWidth(0.2);
+    pdf.rect(cardX + 2, cardY + 2, cardW - 4, cardH - 4);
+
+    // ---------- Cabecera: logo banner centrado ----------
+    let cursorY = cardY + 10;            // y por donde vamos dibujando
+
+    if (logoData && logoData.dataURL) {
+      // Logo manteniendo aspect ratio. Caja máxima 130 mm de ancho × 45 mm de alto.
+      const maxW = 130, maxH = 45;
+      const ratio = logoData.w / logoData.h;
+      let drawW = maxW, drawH = maxW / ratio;
+      if (drawH > maxH) { drawH = maxH; drawW = maxH * ratio; }
+      const drawX = cardX + (cardW - drawW) / 2;
+      pdf.addImage(logoData.dataURL, "PNG", drawX, cursorY, drawW, drawH,
+                   undefined, "FAST");
+      cursorY += drawH + 4;
+    } else {
+      // Placeholder: círculo grande con siglas
+      const r = 18;
+      pdf.setDrawColor(40, 60, 110);
+      pdf.setFillColor(232, 240, 254);
+      pdf.circle(cardX + cardW/2, cursorY + r, r, "FD");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(20);
+      pdf.setTextColor(40, 60, 110);
+      pdf.text(siglas, cardX + cardW/2, cursorY + r + 3, { align: "center" });
+      cursorY += 2*r + 4;
+    }
+
+    // Subtítulo con nombre del evento
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(15);
+    pdf.setTextColor(40, 60, 110);
+    pdf.text(evento, cardX + cardW/2, cursorY + 7, { align: "center" });
+    cursorY += 11;
+
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.setTextColor(120, 120, 120);
+    pdf.text("ENTRADA · Presenta este código al entrar", cardX + cardW/2,
+             cursorY + 4, { align: "center" });
+    cursorY += 6;
+
+    // Línea separadora
+    pdf.setDrawColor(40, 60, 110);
+    pdf.setLineWidth(0.4);
+    pdf.line(cardX + 12, cursorY + 3, cardX + cardW - 12, cursorY + 3);
+    cursorY += 8;
+
+    // ---------- QR enorme centrado ----------
+    const qrSize = 92;
+    const qrX = cardX + (cardW - qrSize) / 2;
+    const qrY = cursorY;
+    const qrDataURL = await generarQRDataURL(codigo, 512);
+    pdf.addImage(qrDataURL, "PNG", qrX, qrY, qrSize, qrSize);
+
+    // Borde fino alrededor del QR
+    pdf.setDrawColor(220);
+    pdf.setLineWidth(0.2);
+    pdf.rect(qrX - 2, qrY - 2, qrSize + 4, qrSize + 4);
+
+    // ---------- Código de la entrada ----------
+    pdf.setFont("courier", "bold");
+    pdf.setFontSize(20);
+    pdf.setTextColor(40, 60, 110);
+    pdf.text(codigo, W/2, qrY + qrSize + 12, { align: "center" });
+
+    // ---------- Datos del evento ----------
+    const infoY = qrY + qrSize + 22;
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(11);
+    pdf.setTextColor(60, 60, 60);
+
+    const linea = (label, value, y, pendiente) => {
+      pdf.setFont("helvetica", "bold");
+      pdf.setTextColor(60, 60, 60);
+      pdf.text(label, cardX + 18, y);
+      pdf.setFont("helvetica", pendiente ? "italic" : "normal");
+      if (pendiente) {
+        pdf.setTextColor(200, 130, 50);
+      } else {
+        pdf.setTextColor(60, 60, 60);
+      }
+      pdf.text(value, cardX + 50, y);
+      pdf.setTextColor(60, 60, 60);
+    };
+    const esPendiente = (s) => /por confirmar/i.test(s || "");
+    linea("FECHA:", fecha, infoY,        esPendiente(fecha));
+    linea("HORA:",  hora,  infoY + 7,    esPendiente(hora));
+    if (lugar) linea("LUGAR:", lugar, infoY + 14, esPendiente(lugar));
+
+    // ---------- Línea de corte decorativa ----------
+    const cutY = cardY + cardH - 28;
+    pdf.setDrawColor(180);
+    pdf.setLineWidth(0.3);
+    pdf.setLineDashPattern([1.5, 1.5], 0);
+    pdf.line(cardX + 8, cutY, cardX + cardW - 8, cutY);
+    pdf.setLineDashPattern([], 0);
+    pdf.setFillColor(255, 255, 255);
+    pdf.rect(W/2 - 4, cutY - 2, 8, 4, "F");
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.setTextColor(140);
+    pdf.text("✂", W/2, cutY + 1.5, { align: "center" });
+
+    // ---------- Pie ----------
+    const footY = cardY + cardH - 16;
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(11);
+    pdf.setTextColor(40, 60, 110);
+    pdf.text("Una entrada, una persona", W/2, footY, { align: "center" });
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(8);
+    pdf.setTextColor(140);
+    pdf.text("Esta entrada es nominativa al portador. Consérvala hasta el final del evento.",
+             W/2, footY + 5, { align: "center" });
+  }
+
+  // ============================================================
+  //  Utilidades de carga
+  // ============================================================
+  function cargarScript(src) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) return resolve();
+      const s = document.createElement("script");
+      s.src = src; s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  // Carga el logo y lo redimensiona (para no inflar el PDF si es enorme).
+  // Devuelve { dataURL, w, h } con las dimensiones originales (para
+  // poder mantener el aspect ratio al dibujarlo). null si no se puede.
+  async function cargarLogoComoDataURL(url, maxPx = 600) {
+    if (!url) return null;
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) return null;
+      const blob = await r.blob();
+      const objURL = URL.createObjectURL(blob);
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = rej;
+        img.src = objURL;
+      });
+      const origW = img.naturalWidth, origH = img.naturalHeight;
+      const scale = Math.min(maxPx / origW, maxPx / origH, 1);
+      const w = Math.max(1, Math.round(origW * scale));
+      const h = Math.max(1, Math.round(origH * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      const dataURL = canvas.toDataURL('image/png');
+      URL.revokeObjectURL(objURL);
+      return { dataURL, w: origW, h: origH };
+    } catch (e) {
+      console.warn('No se pudo cargar logo:', e);
+      return null;
+    }
+  }
+
+  // Genera un PNG dataURL del QR usando qrcodejs
+  function generarQRDataURL(texto, size) {
+    return new Promise((resolve) => {
+      const div = document.createElement("div");
+      div.style.display = "none";
+      document.body.appendChild(div);
+      // eslint-disable-next-line no-new
+      new QRCode(div, {
+        text: texto, width: size, height: size,
+        correctLevel: QRCode.CorrectLevel.H
+      });
+      setTimeout(() => {
+        const img = div.querySelector("img");
+        const canvas = div.querySelector("canvas");
+        const dataURL = img ? img.src : canvas.toDataURL("image/png");
+        document.body.removeChild(div);
+        resolve(dataURL);
+      }, 50);
+    });
+  }
+</script>
+
+</body>
+</html>
